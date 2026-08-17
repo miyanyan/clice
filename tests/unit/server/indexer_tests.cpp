@@ -1273,6 +1273,7 @@ TEST_CASE(UnavailableWorkerDoesNotSpinInCurrentRound) {
     f.loop.schedule(stop_after_sample());
     f.loop.run();
 
+    ASSERT_TRUE(f.indexer.pending_reason(id).has_value());
     ASSERT_EQ(rounds, 1u);
     ASSERT_EQ(last_report.total, 1u);
     ASSERT_EQ(last_report.completed, last_report.total);
