@@ -1005,12 +1005,16 @@ kota::task<> Indexer::run_background_indexing() {
     // running round, but staleness is re-judged per round anyway.
     fv_verdicts.clear();
 
+    // Freeze this round's boundary before announcing it. Progress callbacks
+    // and failed tasks may enqueue more work; those entries belong to the
+    // next idle-delayed round, not the one currently being drained.
+    const auto round_end = index_queue.size();
     std::stable_partition(
         index_queue.begin() + index_queue_pos,
-        index_queue.end(),
+        index_queue.begin() + round_end,
         [this](std::uint32_t id) { return workspace.path_to_module.contains(id); });
 
-    auto total = index_queue.size() - index_queue_pos;
+    auto total = round_end - index_queue_pos;
     std::size_t dispatched = 0;
     std::size_t completed = 0;
 
@@ -1025,7 +1029,7 @@ kota::task<> Indexer::run_background_indexing() {
     ScopedTimer timer;
     kota::task_group<> workers(loop);
 
-    while(index_queue_pos < index_queue.size()) {
+    while(index_queue_pos < round_end) {
         if(pause_depth > 0)
             co_await resume_event.wait();
 

@@ -2,6 +2,7 @@
 #include <limits>
 #include <memory>
 
+#include "test/cdb_helper.h"
 #include "test/temp_dir.h"
 #include "test/test.h"
 #include "command/argument_parser.h"
@@ -1223,6 +1224,59 @@ TEST_CASE(DropIndexEvictsPersisted) {
 };  // TEST_SUITE(IndexerLoad)
 
 TEST_SUITE(IndexerRequeue) {
+
+TEST_CASE(UnavailableWorkerDoesNotSpinInCurrentRound) {
+    TempDir tmp;
+    IndexerFixture f;
+
+    tmp.touch("retry.cpp", "int retry_me;\n");
+    auto path = tmp.path("retry.cpp");
+    auto cdb = build_cdb_json({
+        {tmp.root, path, {}}
+    });
+    write_cdb(tmp, f.workspace.cdb, cdb);
+
+    // A started but empty pool returns worker_unavailable while still
+    // treating the outage as retryable -- the state that triggered the loop.
+    ASSERT_TRUE(f.pool.start({.stateless_count = 0, .stateful_count = 0}));
+
+    f.workspace.config.project.idle_timeout_ms = 0;
+
+    constexpr std::size_t runaway_threshold = 64;
+    std::size_t rounds = 0;
+    Indexer::Progress last_report;
+    auto progress_connection = f.indexer.on_progress_changed.connect([&] {
+        const auto& state = f.indexer.progress();
+        if(state.stage == Indexer::Progress::Stage::Begin) {
+            ++rounds;
+            // A legitimate retry belongs to a later, idle-delayed round.
+            f.workspace.config.project.idle_timeout_ms = 60'000;
+            return;
+        }
+        if(state.stage != Indexer::Progress::Stage::Report)
+            return;
+
+        last_report = state;
+        if(state.completed == runaway_threshold)
+            f.indexer.pause_indexing();
+    });
+
+    auto id = f.workspace.path_pool.intern(path);
+    f.indexer.enqueue(id, ReindexReason::ContentChanged);
+    f.indexer.schedule();
+
+    auto stop_after_sample = [&]() -> kota::task<> {
+        co_await kota::sleep(25);
+        co_await f.indexer.stop();
+        co_await f.pool.stop();
+    };
+    f.loop.schedule(stop_after_sample());
+    f.loop.run();
+
+    ASSERT_EQ(rounds, 1u);
+    ASSERT_EQ(last_report.total, 1u);
+    ASSERT_EQ(last_report.completed, last_report.total);
+}
 
 TEST_CASE(PreemptionKeepsBudget) {
     IndexerFixture f;
